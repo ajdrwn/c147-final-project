@@ -278,3 +278,51 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+
+class RNNEncoder(nn.Module):
+    """A bidirectional RNN encoder that can be stacked after a CNN encoder.
+
+    Takes input of shape (T, N, num_features) and returns (T, N, num_features).
+    A linear projection maps the RNN output back to num_features so it can
+    be used as a drop-in addition to the pipeline.
+
+    Args:
+        num_features (int): Input (and output) feature dimension.
+        rnn_type (str): Type of RNN — "lstm" or "gru". (default: "lstm")
+        hidden_size (int): Hidden size of the RNN. (default: 256)
+        num_layers (int): Number of stacked RNN layers. (default: 2)
+        dropout (float): Dropout between RNN layers. (default: 0.1)
+        bidirectional (bool): Whether to use bidirectional RNN. (default: True)
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        rnn_type: str = "lstm",
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        bidirectional: bool = True,
+    ) -> None:
+        super().__init__()
+
+        rnn_cls = {"lstm": nn.LSTM, "gru": nn.GRU}[rnn_type.lower()]
+        self.rnn = rnn_cls(
+            input_size=num_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+            batch_first=False,  # input is (T, N, features)
+        )
+
+        rnn_out_size = hidden_size * (2 if bidirectional else 1)
+        self.projection = nn.Linear(rnn_out_size, num_features)
+        self.layer_norm = nn.LayerNorm(num_features)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, num_features)
+        rnn_out, _ = self.rnn(inputs)  # (T, N, hidden_size * num_directions)
+        projected = self.projection(rnn_out)  # (T, N, num_features)
+        return self.layer_norm(projected + inputs)  # skip connection
