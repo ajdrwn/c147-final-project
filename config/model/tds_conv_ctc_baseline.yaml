@@ -1,0 +1,17 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.TDSConvCTCModule
+  in_features: 528  # freq * channels = (n_fft // 2 + 1) * 16
+  # mlp_features: [384] 
+  mlp_features: [384, 256] # Variant D got 83 val CER, 84 test CER, 40 epochs: 24 test CER 22 val CER
+  # block_channels: [24, 24, 24, 24] # original, @ 15 epochs got 83 val CER
+  block_channels: [32, 32, 32, 32]  # Variant A: Increased channels, achieved 84 CER 
+  # block_channels: [24, 24, 24, 24, 24, 24] # Variant B deeper: val CER 99.4
+  # kernel_width: 48  # Variant C:larger receptive field 100 CER, 40 epochs 39 val CER
+  kernel_width: 24  # Total temporal receptive field of 125 samples given 4 layers, val CER 32
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000  # 4 sec windows for 2kHz EMG
+  padding: [1800, 200]  # 900ms past context, 100ms future context
+  
