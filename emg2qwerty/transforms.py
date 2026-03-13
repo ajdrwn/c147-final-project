@@ -243,3 +243,77 @@ class SpecAugment:
 
         # (..., C, freq, T) -> (T, ..., C, freq)
         return x.movedim(-1, 0)
+
+
+# Additional Data augmentation:
+
+@dataclass
+class AdditiveGaussianNoise:
+    """
+    Adds zero-mean Gaussian noise to the input tensor.
+    """
+
+    std: float = 0.01
+
+    def __post_init__(self) -> None:
+        assert self.std >= 0
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.std == 0:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return tensor + noise
+    
+
+@dataclass
+class RandomAmplitudeScale:
+    """
+    Multiplies the whole EMG window by a random scalar.
+
+    """
+
+    min_scale: float = 0.9
+    max_scale: float = 1.1
+
+    def __post_init__(self) -> None:
+        assert self.min_scale > 0
+        assert self.max_scale >= self.min_scale
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        scale = torch.empty(1).uniform_(self.min_scale, self.max_scale).item()
+        return tensor * scale
+    
+# dropout for testing importance of # of channels
+@dataclass
+class RandomChannelDropout:
+    """
+    Randomly zeros out electrode channels independently.
+
+    """
+
+    dropout_prob: float = 0.0
+    band_dim: int = 1
+    channel_dim: int = 2
+
+    def __post_init__(self) -> None:
+        assert 0.0 <= self.dropout_prob <= 1.0
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.dropout_prob == 0.0:
+            return tensor
+
+        out = tensor.clone()
+
+        num_bands = out.shape[self.band_dim]
+        num_channels = out.shape[self.channel_dim]
+
+        mask = torch.rand(num_bands, num_channels, device=out.device) > self.dropout_prob
+        mask = mask.to(out.dtype)
+
+        # reshape mask to broadcast over time
+        shape = [1] * out.ndim
+        shape[self.band_dim] = num_bands
+        shape[self.channel_dim] = num_channels
+        mask = mask.view(*shape)
+
+        return out * mask
