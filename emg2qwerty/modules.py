@@ -278,3 +278,46 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+        
+
+class GRUEncoder(nn.Module):
+    """A GRU-based encoder for inputs of shape (T, N, num_features)."""
+
+    def __init__(
+        self,
+        num_features: int,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        bidirectional: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.num_features = num_features
+        self.bidirectional = bidirectional
+
+        self.gru = nn.GRU(
+            input_size=num_features,
+            hidden_size=num_features,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+        )
+
+        out_features = num_features * (2 if bidirectional else 1)
+        self.proj = (
+            nn.Linear(out_features, num_features)
+            if bidirectional
+            else nn.Identity()
+        )
+        self.layer_norm = nn.LayerNorm(num_features)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gru(inputs)
+        x = self.proj(x)
+        x = x + inputs
+        return self.layer_norm(x)
+
+
+
+

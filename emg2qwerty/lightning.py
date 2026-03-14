@@ -22,12 +22,22 @@ from emg2qwerty.charset import charset
 from emg2qwerty.data import LabelData, WindowedEMGDataset
 from emg2qwerty.metrics import CharacterErrorRates
 from emg2qwerty.modules import (
+    GRUEncoder,
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
 )
 from emg2qwerty.transforms import Transform
 
+
+class Transpose(nn.Module):
+    def __init__(self, dim0: int, dim1: int):
+        super().__init__()
+        self.dim0 = dim0
+        self.dim1 = dim1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.transpose(self.dim0, self.dim1)
 
 class WindowedEMGDataModule(pl.LightningDataModule):
     def __init__(
@@ -253,6 +263,152 @@ class TDSConvCTCModule(pl.LightningModule):
 
     def test_step(self, *args, **kwargs) -> torch.Tensor:
         return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
+
+class GRUCTCModule(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        num_layers: int,
+        dropout: float,
+        bidirectional: bool,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        # Add this before your GRU but after the MLP
+        self.model = nn.Sequential(
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            nn.Flatten(start_dim=2),
+            
+            # NEW: Temporal Downsampling Layer
+            # This reduc es 8000 steps -> 1000 steps (stride=8)
+            # Shapes: (T, N, C) -> (N, C, T) -> Conv1d -> (N, 384, T/8) -> (T/8, N, 384)
+            nn.Sequential(
+                # We need to transpose for Conv1d: (T, N, C) -> (N, C, T)
+                Transpose(0, 1), # Custom helper to swap T and N
+                Transpose(1, 2), # Now (N, C, T)
+                nn.Conv1d(num_features, 384, kernel_size=15, stride=8, padding=7),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                Transpose(1, 2), # Back to (N, T/8, 384)
+                Transpose(0, 1), # Back to (T/8, N, 384)
+            ),
+
+            GRUEncoder(
+                num_features=384, # Matches the Conv1d output
+                num_layers=num_layers,
+                dropout=dropout,
+                bidirectional=bidirectional,
+            ),
+            nn.Linear(384, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+        self.decoder = instantiate(decoder)
+
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.model(inputs)
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], batch_idx: int, *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)
+
+        # Ensures emission_lengths never exceeds the actual tensor size
+        emissions = self.forward(inputs)
+        emission_lengths = torch.clamp(
+            torch.div(input_lengths + 7, 8, rounding_mode="floor"),
+            max=emissions.shape[0],
+        )
+        loss = self.ctc_loss(
+            log_probs=emissions,
+            targets=targets.transpose(0, 1),
+            input_lengths=emission_lengths,
+            target_lengths=target_lengths,
+        )
+
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets_np = targets.detach().cpu().numpy()
+        target_lengths_np = target_lengths.detach().cpu().numpy()
+
+        if (
+            phase == "val"
+            and not self.trainer.sanity_checking
+            and self.current_epoch >= 1
+            and batch_idx == 0
+        ):
+            print("Prediction:", predictions[0])
+            target0 = LabelData.from_labels(targets_np[: target_lengths_np[0], 0])
+            print("Target:", target0)
+
+        for i in range(N):
+            target = LabelData.from_labels(targets_np[: target_lengths_np[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
+        return self._step("train", batch, batch_idx)
+
+    def validation_step(self, batch, batch_idx) -> torch.Tensor:
+        return self._step("val", batch, batch_idx)
+
+    def test_step(self, batch, batch_idx) -> torch.Tensor:
+        return self._step("test", batch, batch_idx)
 
     def on_train_epoch_end(self) -> None:
         self._epoch_end("train")
