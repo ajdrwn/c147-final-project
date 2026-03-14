@@ -278,3 +278,66 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+
+class LSTMEncoder(nn.Module):
+    """A sequence encoder built from stacked LSTM layers.
+
+    Args:
+        in_features (int): Number of features in the input sequence for an
+            input of shape (T, N, in_features).
+        hidden_size (int): LSTM hidden size per direction.
+        num_layers (int): Number of stacked recurrent layers.
+        dropout (float): Dropout applied between recurrent layers.
+        bidirectional (bool): Whether to use a bidirectional LSTM.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_size: int,
+        num_layers: int = 3,
+        dropout: float = 0.0,
+        bidirectional: bool = True,
+    ) -> None:
+        super().__init__()
+
+        assert hidden_size > 0
+        assert num_layers > 0
+        assert dropout >= 0.0
+
+        self.hidden_size = hidden_size
+        self.bidirectional = bidirectional
+
+        self.lstm = nn.LSTM(
+            input_size=in_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+        )
+
+    @property
+    def out_features(self) -> int:
+        return self.hidden_size * (2 if self.bidirectional else 1)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        input_lengths: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_lengths is None:
+            outputs, _ = self.lstm(inputs)
+            return outputs
+
+        packed_inputs = nn.utils.rnn.pack_padded_sequence(
+            inputs,
+            lengths=input_lengths.to(dtype=torch.int64, device="cpu"),
+            enforce_sorted=False,
+        )
+        packed_outputs, _ = self.lstm(packed_inputs)
+        outputs, _ = nn.utils.rnn.pad_packed_sequence(
+            packed_outputs,
+            total_length=inputs.shape[0],
+        )
+        return outputs
