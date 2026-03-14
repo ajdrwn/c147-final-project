@@ -5,7 +5,6 @@ This course project is built upon the emg2qwerty work from Meta. The first secti
 
 
 ## Branch Guide:
-## Branch guide
 
 - `main`: clean base repository / reference starting point
 - `CNN-Alteration`: CNN/TDS-only architecture modifications
