@@ -317,3 +317,62 @@ class RandomChannelDropout:
         mask = mask.view(*shape)
 
         return out * mask
+
+
+
+
+
+
+
+
+# functions to downsample time and # of channels for questions 3-5
+
+
+@dataclass
+class DownsampleTime:
+    """
+    Downsample the raw EMG in time by keeping every `factor`-th sample.
+    Input is expected to be shape (T, bands, channels) after ToTensor.
+    """
+
+    factor: int = 1
+
+    def __post_init__(self) -> None:
+        assert self.factor >= 1
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.factor == 1:
+            return tensor
+        return tensor[:: self.factor]
+
+
+@dataclass
+class KeepFirstKChannels:
+    """
+    Keep only the first k electrode channels per band and zero out the rest.
+    This preserves the original tensor shape, so the rest of the model code
+    does not need to change.
+
+    Expected input shape after ToTensor: (T, bands, channels)
+    """
+
+    k: int
+    band_dim: int = 1
+    channel_dim: int = 2
+
+    def __post_init__(self) -> None:
+        assert self.k >= 1
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        out = tensor.clone()
+        num_channels = out.shape[self.channel_dim]
+        k = min(self.k, num_channels)
+
+        mask = torch.zeros(num_channels, dtype=out.dtype, device=out.device)
+        mask[:k] = 1.0
+
+        shape = [1] * out.ndim
+        shape[self.channel_dim] = num_channels
+        mask = mask.view(*shape)
+
+        return out * mask
